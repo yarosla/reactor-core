@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -334,7 +335,7 @@ public class FluxRetryWhenTest {
     public void scanMainSubscriber() {
         CoreSubscriber<Integer> actual = new LambdaSubscriber<>(null, e -> {}, null, null);
         FluxRetryWhen.RetryWhenMainSubscriber<Integer> test =
-        		new FluxRetryWhen.RetryWhenMainSubscriber<>(actual, null, Flux.empty());
+        		new FluxRetryWhen.RetryWhenMainSubscriber<>(actual, null, Flux.empty(), () -> {});
         Subscription parent = Operators.emptySubscription();
         test.onSubscribe(parent);
 
@@ -352,7 +353,7 @@ public class FluxRetryWhenTest {
     public void scanOtherSubscriber() {
 		CoreSubscriber<Integer> actual = new LambdaSubscriber<>(null, e -> {}, null, null);
         FluxRetryWhen.RetryWhenMainSubscriber<Integer> main =
-        		new FluxRetryWhen.RetryWhenMainSubscriber<>(actual, null, Flux.empty());
+        		new FluxRetryWhen.RetryWhenMainSubscriber<>(actual, null, Flux.empty(), () -> {});
         FluxRetryWhen.RetryWhenOtherSubscriber test = new FluxRetryWhen.RetryWhenOtherSubscriber();
         test.main = main;
 
@@ -367,7 +368,7 @@ public class FluxRetryWhenTest {
 		CoreSubscriber<Throwable> signaller = new LambdaSubscriber<>(null, e -> {}, null, null);
 		Flux<Integer> when = Flux.empty();
 		FluxRetryWhen.RetryWhenMainSubscriber<Integer> main = new FluxRetryWhen
-				.RetryWhenMainSubscriber<>(actual, signaller, when);
+				.RetryWhenMainSubscriber<>(actual, signaller, when, () -> {});
 
 		List<Scannable> inners = main.inners().collect(Collectors.toList());
 
@@ -729,5 +730,87 @@ public class FluxRetryWhenTest {
 		finally {
 			backoffScheduler.dispose();
 		}
+	}
+
+	@Test
+	public void resetBackoffFunction() {
+		AtomicInteger resetCounter = new AtomicInteger();
+		AtomicInteger count = new AtomicInteger();
+		Flux<Integer> source = Flux.generate(sink -> {
+			int step = count.incrementAndGet();
+			switch (step) {
+				case 1:
+				case 2:
+				case 5:
+				case 6:
+					sink.error(new IllegalStateException("failing on step " + step));
+					break;
+				case 3: //should reset
+				case 4: //should NOT reset
+				case 7: //should reset
+					sink.next(step);
+					break;
+				case 8:
+					sink.next(step); //should NOT reset
+					sink.complete();
+					break;
+				default:
+					sink.complete();
+					break;
+			}
+		});
+
+		Function<Flux<Throwable>, Publisher<Long>> retryFunction =
+				FluxRetryWhen.randomExponentialBackoffFunction(2,
+						Duration.ZERO,
+						Duration.ofMillis(100),
+						0d,
+						Schedulers.parallel())
+				.andThen(p -> {
+					resetCounter.incrementAndGet();
+					return p;
+				});
+
+		new FluxRetryWhen<>(source, retryFunction, true)
+				.as(StepVerifier::create)
+				.expectNext(3, 4, 7, 8)
+				.expectComplete()
+				.verify(Duration.ofSeconds(2));
+
+		assertThat(resetCounter).hasValue(3); //1 initial application then 2 resets
+	}
+
+	@Test
+	public void gh1978() {
+		final int elementPerCycle = 3;
+		final int stopAfterCycles = 10;
+		Flux<Long> source =
+				Flux.generate(() -> new AtomicLong(0), (counter, s) -> {
+					long currentCount = counter.incrementAndGet();
+					if (currentCount % elementPerCycle == 0) {
+						s.error(new RuntimeException("Error!"));
+					}
+					else {
+						s.next(currentCount);
+					}
+					return counter;
+				});
+
+		List<Long> pauses = new ArrayList<>();
+
+		StepVerifier.withVirtualTime(() ->
+				source.retryBackoff(Long.MAX_VALUE, Duration.ofSeconds(1), Duration.ofMinutes(1),
+						      0d, Schedulers.parallel(), true)
+				      .take(stopAfterCycles * elementPerCycle)
+				      .elapsed()
+				      .map(Tuple2::getT1)
+				      .doOnNext(pause -> { if (pause > 500) pauses.add(pause / 1000); })
+		)
+		            .thenAwait(Duration.ofHours(1))
+		            .expectNextCount(stopAfterCycles * elementPerCycle)
+		            .expectComplete()
+		            .verify(Duration.ofSeconds(1));
+
+		assertThat(pauses).allMatch(p -> p == 1, "pause is constantly 1s");
 	}
 }

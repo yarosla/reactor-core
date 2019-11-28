@@ -3693,6 +3693,10 @@ public abstract class Mono<T> implements CorePublisher<T> {
 		return onAssembly(new MonoRetryWhen<>(this, whenFactory));
 	}
 
+	public final Mono<T> retryWhen(Function<Flux<Throwable>, ? extends Publisher<?>> whenFactory, boolean resetOnNext) {
+		return onAssembly(new MonoRetryWhen<>(this, whenFactory, resetOnNext));
+	}
+
 	/**
 	 * In case of error, retry this {@link Mono} up to {@code numRetries} times using a
 	 * randomized exponential backoff strategy (jitter). The jitter factor is {@code 50%}
@@ -3878,6 +3882,10 @@ public abstract class Mono<T> implements CorePublisher<T> {
 	 */
 	public final Mono<T> retryBackoff(long numRetries, Duration firstBackoff, Duration maxBackoff, double jitterFactor, Scheduler backoffScheduler) {
 		return retryWhen(FluxRetryWhen.randomExponentialBackoffFunction(numRetries, firstBackoff, maxBackoff, jitterFactor, backoffScheduler));
+	}
+
+	public final Mono<T> retryBackoff(long numRetries, Duration firstBackoff, Duration maxBackoff, double jitterFactor, Scheduler backoffScheduler, boolean resetOnNext) {
+		return retryWhen(FluxRetryWhen.randomExponentialBackoffFunction(numRetries, firstBackoff, maxBackoff, jitterFactor, backoffScheduler), resetOnNext);
 	}
 
 	/**

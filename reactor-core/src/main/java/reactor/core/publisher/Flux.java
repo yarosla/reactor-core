@@ -7228,6 +7228,10 @@ public abstract class Flux<T> implements CorePublisher<T> {
 		return onAssembly(new FluxRetryWhen<>(this, whenFactory));
 	}
 
+	public final Flux<T> retryWhen(Function<Flux<Throwable>, ? extends Publisher<?>> whenFactory, boolean resetOnNext) {
+		return onAssembly(new FluxRetryWhen<>(this, whenFactory, resetOnNext));
+	}
+
 	/**
 	 * In case of error, retry this {@link Flux} up to {@code numRetries} times using a
 	 * randomized exponential backoff strategy (jitter). The jitter factor is {@code 50%}
@@ -7412,7 +7416,11 @@ public abstract class Flux<T> implements CorePublisher<T> {
 	 * @return a {@link Flux} that retries on onError with exponentially growing randomized delays between retries.
 	 */
 	public final Flux<T> retryBackoff(long numRetries, Duration firstBackoff, Duration maxBackoff, double jitterFactor, Scheduler backoffScheduler) {
-		return retryWhen(FluxRetryWhen.randomExponentialBackoffFunction(numRetries, firstBackoff, maxBackoff, jitterFactor, backoffScheduler));
+		return retryBackoff(numRetries, firstBackoff, maxBackoff, jitterFactor, backoffScheduler, false);
+	}
+
+	public final Flux<T> retryBackoff(long numRetries, Duration firstBackoff, Duration maxBackoff, double jitterFactor, Scheduler backoffScheduler, boolean resetOnNext) {
+		return retryWhen(FluxRetryWhen.randomExponentialBackoffFunction(numRetries, firstBackoff, maxBackoff, jitterFactor, backoffScheduler), resetOnNext);
 	}
 
 	/**

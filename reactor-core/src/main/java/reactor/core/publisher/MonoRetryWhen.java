@@ -35,19 +35,26 @@ import reactor.core.CoreSubscriber;
  */
 final class MonoRetryWhen<T> extends InternalMonoOperator<T, T> {
 
-	final Function<? super Flux<Throwable>, ? extends Publisher<?>>
-			whenSourceFactory;
+	final Function<? super Flux<Throwable>, ? extends Publisher<?>> whenSourceFactory;
+	final boolean resetOnNext;
 
 	MonoRetryWhen(Mono<? extends T> source,
 			Function<? super Flux<Throwable>, ? extends Publisher<?>> whenSourceFactory) {
+		this(source, whenSourceFactory, false);
+	}
+
+	MonoRetryWhen(Mono<? extends T> source,
+			Function<? super Flux<Throwable>, ? extends Publisher<?>> whenSourceFactory,
+			boolean resetOnNext) {
 		super(source);
 		this.whenSourceFactory =
 				Objects.requireNonNull(whenSourceFactory, "whenSourceFactory");
+		this.resetOnNext = resetOnNext;
 	}
 
 	@Override
 	public CoreSubscriber<? super T> subscribeOrReturn(CoreSubscriber<? super T> actual) {
-		FluxRetryWhen.subscribe(actual, whenSourceFactory, source);
+		FluxRetryWhen.subscribe(actual, whenSourceFactory, source, resetOnNext);
 		return null;
 	}
 }
