@@ -7228,6 +7228,50 @@ public abstract class Flux<T> implements CorePublisher<T> {
 		return onAssembly(new FluxRetryWhen<>(this, whenFactory));
 	}
 
+	/**
+	 * Retries this {@link Flux} when a companion sequence signals
+	 * an item in response to this {@link Flux} error signal
+	 * <p>If the companion sequence signals when the {@link Flux} is active, the retry
+	 * attempt is suppressed and any terminal signal will terminate the {@link Flux} source with the same signal
+	 * immediately.
+	 *
+	 * <p>
+	 * <img class="marble" src="doc-files/marbles/retryWhenForFlux.svg" alt="">
+	 * <p>
+	 * Note that if the companion {@link Publisher} created by the {@code whenFactory}
+	 * emits {@link Context} as trigger objects, these {@link Context} will REPLACE the
+	 * operator's own Context. <strong>Please be careful there</strong>: replacing the
+	 * Context means that some keys you don't own could be removed, breaking libraries
+	 * that depend on them. As a result, the recommended approach is to always create such
+	 * a {@link Context} trigger by starting from the original Context (ensuring the trigger
+	 * contains all the keys from the original, unless you absolutely know you want to
+	 * remove one of these keys):
+	 * <pre><code>
+	 * .retryWhen(errorCurrentAttempt -> errorCurrentAttempt
+	 *     .flatMap(e -> Mono.subscriberContext().map(ctx -> Tuples.of(e, ctx)))
+	 *     .flatMap(t2 -> {
+	 * 	    Throwable lastError = t2.getT1();
+	 * 	    Context ctx = t2.getT2();
+	 * 	    int rl = ctx.getOrDefault("retriesLeft", 0);
+	 * 	    if (rl > 0) {
+	 *		    // /!\ THE ctx.put HERE IS THE ESSENTIAL PART /!\
+	 * 		    return Mono.just(ctx.put("retriesLeft", rl - 1)
+	 * 				    .put("lastError", lastError));
+	 * 	    } else {
+	 * 		    return Mono.<Context>error(new IllegalStateException("retries exhausted", lastError));
+	 * 	    }
+	 *     })
+	 * )
+	 * </code></pre>
+	 *
+	 * @param whenFactory the {@link Function} that returns the associated {@link Publisher}
+	 * companion, given a {@link Flux} that signals each onError as a {@link Throwable}.
+	 * @param resetOnNext true to re-apply the factory the first time an element is received <strong>after</strong> a retry.
+	 * this can help with transient errors in long-lived Flux
+	 *
+	 * @return a {@link Flux} that retries on onError when the companion {@link Publisher} produces an
+	 * onNext signal
+	 */
 	public final Flux<T> retryWhen(Function<Flux<Throwable>, ? extends Publisher<?>> whenFactory, boolean resetOnNext) {
 		return onAssembly(new FluxRetryWhen<>(this, whenFactory, resetOnNext));
 	}
@@ -7419,6 +7463,46 @@ public abstract class Flux<T> implements CorePublisher<T> {
 		return retryBackoff(numRetries, firstBackoff, maxBackoff, jitterFactor, backoffScheduler, false);
 	}
 
+	/**
+	 * In case of error, retry this {@link Flux} up to {@code numRetries} times using a
+	 * randomized exponential backoff strategy, randomized with a user-provided jitter
+	 * factor between {@code 0.d} (no jitter) and {@code 1.0} (default is {@code 0.5}).
+	 * Even with the jitter, the effective backoff delay cannot be less than
+	 * {@code firstBackoff} nor more than {@code maxBackoff}. The delays and subsequent
+	 * attempts are executed on the provided backoff {@link Scheduler} (see
+	 * {@link Mono#delay(Duration, Scheduler)}).
+	 <p>
+	 * The randomized exponential backoff is good at preventing two typical issues with
+	 * other simpler backoff strategies, namely:
+	 * <ul>
+	 *     <li>
+	 *      having an exponentially growing backoff delay with a small initial delay gives
+	 *      the best tradeoff between not overwhelming the server and serving the client as
+	 *      fast as possible
+	 *     </li>
+	 *     <li>
+	 *      having a jitter, or randomized backoff delay, is beneficial in avoiding "retry-storms"
+	 *      where eg. numerous clients would hit the server at the same time, causing it to
+	 *      display transient failures which would cause all clients to retry at the same
+	 *      backoff times, ultimately sparing no load on the server.
+	 *     </li>
+	 * </ul>
+	 *
+	 * <p>
+	 * <img class="marble" src="doc-files/marbles/retryBackoffForFlux.svg" alt="">
+	 *
+	 * @param numRetries the maximum number of attempts before an {@link IllegalStateException}
+	 * is raised (having the original retry-triggering exception as cause).
+	 * @param firstBackoff the first backoff delay to apply then grow exponentially. Also
+	 * minimum delay even taking jitter into account.
+	 * @param maxBackoff the maximum delay to apply despite exponential growth and jitter.
+	 * @param jitterFactor the jitter percentage (as a double between 0.0 and 1.0).
+	 * @param backoffScheduler the {@link Scheduler} on which the delays and subsequent attempts are executed.
+	 * @param resetOnNext true to reset the delay the first time an element is received <strong>after</strong> a retry.
+	 * This helps dealing with bursts of transient errors in a long-lived Flux as if each burst had its own backoff.
+	 *
+	 * @return a {@link Flux} that retries on onError with exponentially growing randomized delays between retries.
+	 */
 	public final Flux<T> retryBackoff(long numRetries, Duration firstBackoff, Duration maxBackoff, double jitterFactor, Scheduler backoffScheduler, boolean resetOnNext) {
 		return retryWhen(FluxRetryWhen.randomExponentialBackoffFunction(numRetries, firstBackoff, maxBackoff, jitterFactor, backoffScheduler), resetOnNext);
 	}
