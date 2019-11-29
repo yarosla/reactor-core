@@ -62,9 +62,36 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 		this.resetOnNext = resetOnNext;
 	}
 
-	static <T> void subscribe(CoreSubscriber<? super T> s, Function<? super
-			Flux<Throwable>, ? extends Publisher<?>> whenSourceFactory, CorePublisher<? extends T> source,
-			boolean resetOnNext) {
+	/**
+	 *
+	 * @param other the companion publisher of throwables
+	 * @param downstream the downstream of the main sequence
+	 * @param whenSourceFactory the factory that decorates the other to generate retry triggers
+	 * @param <T> the type of the main sequence
+	 * @return true if the reset went well, false if an error was propagated to downstream
+	 */
+	static <T> boolean resetTrigger(@Nullable final RetryWhenOtherSubscriber other,
+			@Nullable final CoreSubscriber<? super T> downstream,
+			@Nullable final Function<? super Flux<Throwable>, ? extends Publisher<?>> whenSourceFactory) {
+		if (other == null || downstream == null || whenSourceFactory == null) {
+			return true;
+		}
+		Publisher<?> p;
+		try {
+			p = Objects.requireNonNull(whenSourceFactory.apply(other),
+					"The whenSourceFactory returned a null Publisher");
+		}
+		catch (Throwable e) {
+			downstream.onError(Operators.onOperatorError(e, downstream.currentContext()));
+			return false;
+		}
+		p.subscribe(other);
+		return true;
+	}
+
+	static <T> void subscribe(CoreSubscriber<? super T> s,
+			Function<? super Flux<Throwable>, ? extends Publisher<?>> whenSourceFactory,
+			CorePublisher<? extends T> source, boolean resetOnNext) {
 		RetryWhenOtherSubscriber other = new RetryWhenOtherSubscriber();
 		Subscriber<Throwable> signaller = Operators.serialize(other.completionSignal);
 
@@ -72,31 +99,20 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 
 		CoreSubscriber<T> serial = Operators.serialize(s);
 
-		Runnable otherReset = () -> {
-				Publisher<?> p;
-				try {
-					p = Objects.requireNonNull(whenSourceFactory.apply(other),
-							"The whenSourceFactory returned a null Publisher");
-				}
-				catch (Throwable e) {
-					s.onError(Operators.onOperatorError(e, s.currentContext()));
-					return;
-				}
-				p.subscribe(other);
-			};
-
 		RetryWhenMainSubscriber<T> main;
 		if (resetOnNext) {
-			main = new RetryWhenMainSubscriber<>(serial, signaller, source, otherReset);
+			main = new RetryWhenMainSubscriber<>(serial, signaller, source, other, whenSourceFactory);
 		}
 		else {
-			main = new RetryWhenMainSubscriber<>(serial, signaller, source, () -> {});
+			main = new RetryWhenMainSubscriber<>(serial, signaller, source, null, null);
 		}
 		other.main = main;
 
 		serial.onSubscribe(main);
 
-		otherReset.run();
+		if (!resetTrigger(other, s, whenSourceFactory)) {
+			return;
+		}
 
 		if (!main.cancelled) {
 			source.subscribe(main);
@@ -117,12 +133,16 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 		final Subscriber<Throwable> signaller;
 
 		final CorePublisher<? extends T> source;
-		final Runnable otherReset;
+
+		@Nullable
+		final Function<? super Flux<Throwable>, ? extends Publisher<?>> whenSourceFactory;
+		@Nullable
+		final RetryWhenOtherSubscriber other;
+
 		/**
 		 * Should the next onNext call otherReset?
-		 * Invariant: must only be true if otherReset != null.
 		 */
-		boolean doReset;
+		boolean resetTriggerOnNextElement;
 
 		Context context;
 
@@ -132,16 +152,19 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 
 		long produced;
 		
-		RetryWhenMainSubscriber(CoreSubscriber<? super T> actual, Subscriber<Throwable> signaller,
+		RetryWhenMainSubscriber(CoreSubscriber<? super T> actual,
+				Subscriber<Throwable> signaller,
 				CorePublisher<? extends T> source,
-				@Nullable Runnable otherReset) {
+				@Nullable RetryWhenOtherSubscriber other,
+				@Nullable Function<? super Flux<Throwable>, ? extends Publisher<?>> whenSourceFactory) {
 			super(actual);
 			this.signaller = signaller;
 			this.source = source;
 			this.otherArbiter = new Operators.SwapSubscription(true);
 			this.context = actual.currentContext();
-			this.otherReset = otherReset;
-			this.doReset = false;
+			this.other = other;
+			this.whenSourceFactory = whenSourceFactory;
+			this.resetTriggerOnNextElement = false;
 		}
 
 		@Override
@@ -160,18 +183,19 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 				otherArbiter.cancel();
 				super.cancel();
 			}
-
 		}
 
-		public void swap(Subscription w) {
+		void swap(Subscription w) {
 			otherArbiter.swap(w);
 		}
 
 		@Override
 		public void onNext(T t) {
-			if (doReset) {
-				doReset = false;
-				otherReset.run();
+			if (resetTriggerOnNextElement) {
+				resetTriggerOnNextElement = false; //we don't want to reset for subsequent onNext
+				if (!FluxRetryWhen.resetTrigger(other, actual, whenSourceFactory)) {
+					return;
+				}
 			}
 			actual.onNext(t);
 
@@ -180,7 +204,7 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 
 		@Override
 		public void onError(Throwable t) {
-			doReset = otherReset != null;
+			resetTriggerOnNextElement = true;
 			long p = produced;
 			if (p != 0L) {
 				produced = 0;
