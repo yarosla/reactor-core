@@ -15,9 +15,7 @@
  */
 package reactor.core.publisher;
 
-import java.time.Duration;
 import java.util.Objects;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.function.Function;
 import java.util.stream.Stream;
@@ -25,12 +23,13 @@ import java.util.stream.Stream;
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscriber;
 import org.reactivestreams.Subscription;
+
 import reactor.core.CorePublisher;
 import reactor.core.CoreSubscriber;
 import reactor.core.Scannable;
-import reactor.core.scheduler.Scheduler;
 import reactor.util.annotation.Nullable;
 import reactor.util.context.Context;
+import reactor.util.retry.Retry;
 
 /**
  * Retries a source when a companion sequence signals
@@ -44,66 +43,29 @@ import reactor.util.context.Context;
  */
 final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 
-	static final Duration MAX_BACKOFF = Duration.ofMillis(Long.MAX_VALUE);
+	final Function<? super Flux<Retry.State>, ? extends Publisher<?>> whenSourceFactory;
 
-	final Function<? super Flux<Throwable>, ? extends Publisher<?>> whenSourceFactory;
-
-	FluxRetryWhen(Flux<? extends T> source,
-							  Function<? super Flux<Throwable>, ? extends Publisher<?>> whenSourceFactory) {
+	FluxRetryWhen(Flux<? extends T> source, Function<? super Flux<Retry.State>, ? extends Publisher<?>> whenSourceFactory) {
 		super(source);
 		this.whenSourceFactory = Objects.requireNonNull(whenSourceFactory, "whenSourceFactory");
 	}
 
-	/**
-	 *
-	 * @param other the companion publisher of throwables
-	 * @param downstream the downstream of the main sequence
-	 * @param whenSourceFactory the factory that decorates the other to generate retry triggers
-	 * @param <T> the type of the main sequence
-	 * @return true if the reset went well, false if an error was propagated to downstream
-	 */
-	static <T> boolean tryResetTrigger(@Nullable final RetryWhenOtherSubscriber other,
-			@Nullable final CoreSubscriber<? super T> downstream,
-			@Nullable final Function<? super Flux<Throwable>, Publisher<Long>> whenSourceFactory) {
-		if (other == null || downstream == null || whenSourceFactory == null) {
-			return true;
-		}
-		Publisher<?> p;
-		try {
-			p = Objects.requireNonNull(whenSourceFactory.apply(other),
-					"The whenSourceFactory returned a null Publisher");
-		}
-		catch (Throwable e) {
-			downstream.onError(Operators.onOperatorError(e, downstream.currentContext()));
-			return false;
-		}
-		p.subscribe(other);
-		return true;
-	}
-
 	static <T> void subscribe(CoreSubscriber<? super T> s,
-			Function<? super Flux<Throwable>, ? extends Publisher<?>> whenSourceFactory,
+			Function<? super Flux<Retry.State>, ? extends Publisher<?>> whenSourceFactory,
 			CorePublisher<? extends T> source) {
 		RetryWhenOtherSubscriber other = new RetryWhenOtherSubscriber();
-		Subscriber<Throwable> signaller = Operators.serialize(other.completionSignal);
+		Subscriber<Retry.State> signaller = Operators.serialize(other.completionSignal);
 
 		signaller.onSubscribe(Operators.emptySubscription());
 
 		CoreSubscriber<T> serial = Operators.serialize(s);
 
-		RetryWhenMainSubscriber<T> main;
-		if (whenSourceFactory instanceof TransientResubscribeWhenFunction) {
-			Function<? super Flux<Throwable>, Publisher<Long>> transientFunction = (Function<? super Flux<Throwable>, Publisher<Long>>) whenSourceFactory;
-			main = new RetryWhenMainSubscriber<>(serial, signaller, source, other,transientFunction);
-		}
-		else {
-			main = new RetryWhenMainSubscriber<>(serial, signaller, source);
-		}
+		RetryWhenMainSubscriber<T> main =
+				new RetryWhenMainSubscriber<>(serial, signaller, source);
 
 		other.main = main;
 		serial.onSubscribe(main);
 
-		//this behavior is copied in `tryResetTrigger` for the transient case
 		Publisher<?> p;
 		try {
 			p = Objects.requireNonNull(whenSourceFactory.apply(other), "The whenSourceFactory returned a null Publisher");
@@ -125,24 +87,19 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 		return null;
 	}
 
-	static final class RetryWhenMainSubscriber<T> extends
-	                                              Operators.MultiSubscriptionSubscriber<T, T> {
+	static final class RetryWhenMainSubscriber<T> extends Operators.MultiSubscriptionSubscriber<T, T>
+			implements Retry.State {
 
 		final Operators.SwapSubscription otherArbiter;
 
-		final Subscriber<Throwable> signaller;
+		final Subscriber<Retry.State> signaller;
 
 		final CorePublisher<? extends T> source;
 
+		long totalFailureIndex = 0L;
+		long subsequentFailureIndex = 0L;
 		@Nullable
-		final Function<? super Flux<Throwable>, Publisher<Long>> transientWhenSourceFactory;
-		@Nullable
-		final RetryWhenOtherSubscriber other;
-
-		/**
-		 * Should the next onNext call otherReset?
-		 */
-		boolean resetTriggerOnNextElement;
+		Throwable lastFailure = null;
 
 		Context context;
 
@@ -153,24 +110,28 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 		long produced;
 		
 		RetryWhenMainSubscriber(CoreSubscriber<? super T> actual,
-				Subscriber<Throwable> signaller,
-				CorePublisher<? extends T> source,
-				@Nullable RetryWhenOtherSubscriber other,
-				@Nullable Function<? super Flux<Throwable>, Publisher<Long>> transientWhenSourceFactory) {
+				Subscriber<Retry.State> signaller,
+				CorePublisher<? extends T> source) {
 			super(actual);
 			this.signaller = signaller;
 			this.source = source;
 			this.otherArbiter = new Operators.SwapSubscription(true);
 			this.context = actual.currentContext();
-			this.other = other;
-			this.transientWhenSourceFactory = transientWhenSourceFactory;
-			this.resetTriggerOnNextElement = false;
 		}
 
-		RetryWhenMainSubscriber(CoreSubscriber<? super T> actual,
-				Subscriber<Throwable> signaller,
-				CorePublisher<? extends T> source) {
-			this(actual, signaller, source, null, null);
+		@Override
+		public long failureTotalIndex() {
+			return this.totalFailureIndex - 1;
+		}
+
+		@Override
+		public long failureSubsequentIndex() {
+			return this.subsequentFailureIndex - 1;
+		}
+
+		@Override
+		public Throwable failure() {
+			return this.lastFailure;
 		}
 
 		@Override
@@ -197,12 +158,7 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 
 		@Override
 		public void onNext(T t) {
-			if (resetTriggerOnNextElement) {
-				resetTriggerOnNextElement = false; //we don't want to reset for subsequent onNext
-				if (!FluxRetryWhen.tryResetTrigger(other, actual, transientWhenSourceFactory)) {
-					return;
-				}
-			}
+			subsequentFailureIndex = 0;
 			actual.onNext(t);
 
 			produced++;
@@ -210,7 +166,9 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 
 		@Override
 		public void onError(Throwable t) {
-			resetTriggerOnNextElement = true;
+			totalFailureIndex++;
+			subsequentFailureIndex++;
+			lastFailure = t;
 			long p = produced;
 			if (p != 0L) {
 				produced = 0;
@@ -219,11 +177,12 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 
 			otherArbiter.request(1);
 
-			signaller.onNext(t);
+			signaller.onNext(this);
 		}
 
 		@Override
 		public void onComplete() {
+			lastFailure = null;
 			otherArbiter.cancel();
 
 			actual.onComplete();
@@ -261,11 +220,11 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 		}
 	}
 
-	static final class RetryWhenOtherSubscriber extends Flux<Throwable>
-	implements InnerConsumer<Object>, OptimizableOperator<Throwable, Throwable> {
+	static final class RetryWhenOtherSubscriber extends Flux<Retry.State>
+	implements InnerConsumer<Object>, OptimizableOperator<Retry.State, Retry.State> {
 		RetryWhenMainSubscriber<?> main;
 
-		final DirectProcessor<Throwable> completionSignal = new DirectProcessor<>();
+		final DirectProcessor<Retry.State> completionSignal = new DirectProcessor<>();
 
 		@Override
 		public Context currentContext() {
@@ -302,92 +261,24 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 		}
 
 		@Override
-		public void subscribe(CoreSubscriber<? super Throwable> actual) {
+		public void subscribe(CoreSubscriber<? super Retry.State> actual) {
 			completionSignal.subscribe(actual);
 		}
 
 		@Override
-		public CoreSubscriber<? super Throwable> subscribeOrReturn(CoreSubscriber<? super Throwable> actual) {
+		public CoreSubscriber<? super Retry.State> subscribeOrReturn(CoreSubscriber<? super Retry.State> actual) {
 			return actual;
 		}
 
 		@Override
-		public DirectProcessor<Throwable> source() {
+		public DirectProcessor<Retry.State> source() {
 			return completionSignal;
 		}
 
 		@Override
-		public OptimizableOperator<?, ? extends Throwable> nextOptimizableSource() {
+		public OptimizableOperator<?, ? extends Retry.State> nextOptimizableSource() {
 			return null;
 		}
 	}
 
-	@FunctionalInterface
-	interface TransientResubscribeWhenFunction<T> extends Function<Flux<T>, Publisher<Long>> {
-	}
-
-	static Function<Flux<Throwable>, Publisher<Long>> randomExponentialBackoffFunction(
-			long numRetries, Duration firstBackoff, Duration maxBackoff,
-			double jitterFactor, Scheduler backoffScheduler,
-			boolean isTransient) {
-		if (jitterFactor < 0 || jitterFactor > 1) throw new IllegalArgumentException("jitterFactor must be between 0 and 1 (default 0.5)");
-		Objects.requireNonNull(firstBackoff, "firstBackoff is required");
-		Objects.requireNonNull(maxBackoff, "maxBackoff is required");
-		Objects.requireNonNull(backoffScheduler, "backoffScheduler is required");
-
-		TransientResubscribeWhenFunction<Throwable> function = t ->
-				t.index()
-				 .flatMap(t2 -> {
-					 long iteration = t2.getT1();
-
-					 if (iteration >= numRetries) {
-						 return Mono.<Long>error(new IllegalStateException("Retries exhausted: " + iteration + "/" + numRetries, t2.getT2()));
-					 }
-
-					 Duration nextBackoff;
-					 try {
-						 nextBackoff = firstBackoff.multipliedBy((long) Math.pow(2, iteration));
-						 if (nextBackoff.compareTo(maxBackoff) > 0) {
-							 nextBackoff = maxBackoff;
-						 }
-					 }
-					 catch (ArithmeticException overflow) {
-						 nextBackoff = maxBackoff;
-					 }
-
-					 //short-circuit delay == 0 case
-					 if (nextBackoff.isZero()) {
-						 return Mono.just(iteration);
-					 }
-
-					 ThreadLocalRandom random = ThreadLocalRandom.current();
-
-					 long jitterOffset;
-					 try {
-						 jitterOffset = nextBackoff.multipliedBy((long) (100 * jitterFactor))
-						                           .dividedBy(100)
-						                           .toMillis();
-					 }
-					 catch (ArithmeticException ae) {
-						 jitterOffset = Math.round(Long.MAX_VALUE * jitterFactor);
-					 }
-					 long lowBound = Math.max(firstBackoff.minus(nextBackoff)
-					                                      .toMillis(), -jitterOffset);
-					 long highBound = Math.min(maxBackoff.minus(nextBackoff)
-					                                     .toMillis(), jitterOffset);
-
-					 long jitter;
-					 if (highBound == lowBound) {
-						 if (highBound == 0) jitter = 0;
-						 else jitter = random.nextLong(highBound);
-					 }
-					 else {
-						 jitter = random.nextLong(lowBound, highBound);
-					 }
-					 Duration effectiveBackoff = nextBackoff.plusMillis(jitter);
-					 return Mono.delay(effectiveBackoff, backoffScheduler);
-				 });
-		if (isTransient) return function;
-		return function::apply; //do not replace with qualifier, so that instanceof doesn't consider this one transient
-	}
 }
