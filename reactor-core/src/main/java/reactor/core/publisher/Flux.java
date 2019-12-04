@@ -7229,54 +7229,6 @@ public abstract class Flux<T> implements CorePublisher<T> {
 	}
 
 	/**
-	 * Retries this {@link Flux} when a companion sequence signals
-	 * an item in response to this {@link Flux} error signal
-	 * <p>If the companion sequence signals when the {@link Flux} is active, the retry
-	 * attempt is suppressed and any terminal signal will terminate the {@link Flux} source with the same signal
-	 * immediately.
-	 *
-	 * <p>
-	 * <img class="marble" src="doc-files/marbles/retryWhenForFlux.svg" alt="">
-	 * <p>
-	 * Note that if the companion {@link Publisher} created by the {@code whenFactory}
-	 * emits {@link Context} as trigger objects, these {@link Context} will REPLACE the
-	 * operator's own Context. <strong>Please be careful there</strong>: replacing the
-	 * Context means that some keys you don't own could be removed, breaking libraries
-	 * that depend on them. As a result, the recommended approach is to always create such
-	 * a {@link Context} trigger by starting from the original Context (ensuring the trigger
-	 * contains all the keys from the original, unless you absolutely know you want to
-	 * remove one of these keys):
-	 * <pre><code>
-	 * .retryWhen(errorCurrentAttempt -> errorCurrentAttempt
-	 *     .flatMap(e -> Mono.subscriberContext().map(ctx -> Tuples.of(e, ctx)))
-	 *     .flatMap(t2 -> {
-	 * 	    Throwable lastError = t2.getT1();
-	 * 	    Context ctx = t2.getT2();
-	 * 	    int rl = ctx.getOrDefault("retriesLeft", 0);
-	 * 	    if (rl > 0) {
-	 *		    // /!\ THE ctx.put HERE IS THE ESSENTIAL PART /!\
-	 * 		    return Mono.just(ctx.put("retriesLeft", rl - 1)
-	 * 				    .put("lastError", lastError));
-	 * 	    } else {
-	 * 		    return Mono.<Context>error(new IllegalStateException("retries exhausted", lastError));
-	 * 	    }
-	 *     })
-	 * )
-	 * </code></pre>
-	 *
-	 * @param whenFactory the {@link Function} that returns the associated {@link Publisher}
-	 * companion, given a {@link Flux} that signals each onError as a {@link Throwable}.
-	 * @param resetOnNext true to re-apply the factory the first time an element is received <strong>after</strong> a retry.
-	 * this can help with transient errors in long-lived Flux
-	 *
-	 * @return a {@link Flux} that retries on onError when the companion {@link Publisher} produces an
-	 * onNext signal
-	 */
-	public final Flux<T> retryWhen(Function<Flux<Throwable>, ? extends Publisher<?>> whenFactory, boolean resetOnNext) {
-		return onAssembly(new FluxRetryWhen<>(this, whenFactory, resetOnNext));
-	}
-
-	/**
 	 * In case of error, retry this {@link Flux} up to {@code numRetries} times using a
 	 * randomized exponential backoff strategy (jitter). The jitter factor is {@code 50%}
 	 * but the effective backoff delay cannot be less than {@code firstBackoff}.
@@ -7504,7 +7456,7 @@ public abstract class Flux<T> implements CorePublisher<T> {
 	 * @return a {@link Flux} that retries on onError with exponentially growing randomized delays between retries.
 	 */
 	public final Flux<T> retryBackoff(long numRetries, Duration firstBackoff, Duration maxBackoff, double jitterFactor, Scheduler backoffScheduler, boolean resetOnNext) {
-		return retryWhen(FluxRetryWhen.randomExponentialBackoffFunction(numRetries, firstBackoff, maxBackoff, jitterFactor, backoffScheduler), resetOnNext);
+		return retryWhen(FluxRetryWhen.randomExponentialBackoffFunction(numRetries, firstBackoff, maxBackoff, jitterFactor, backoffScheduler, resetOnNext));
 	}
 
 	/**

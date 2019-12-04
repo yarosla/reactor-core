@@ -21,7 +21,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -531,7 +530,6 @@ public class FluxRetryWhenTest {
 
 		StepVerifier.withVirtualTime(() ->
 				Flux.concat(Flux.range(0, 2), Flux.error(exception))
-				    .log()
 				    .retryBackoff(4, Duration.ofMillis(100))
 				    .elapsed()
 				    .doOnNext(elapsed -> { if (elapsed.getT2() == 0) elapsedList.add(elapsed.getT1());} )
@@ -667,7 +665,8 @@ public class FluxRetryWhenTest {
 					INIT,
 					EXPLICIT_MAX,
 					0d,
-					Schedulers.parallel());
+					Schedulers.parallel(),
+					false);
 
 			return Flux.error(new IllegalStateException("boom"))
 			    .retryWhen(backoffFunction);
@@ -682,16 +681,14 @@ public class FluxRetryWhenTest {
 	}
 
 	@Test
-	public void fluxRetryBackoffWithGivenScheduler() {
+	public void fluxRetryBackoffWithSpecificScheduler() {
 		VirtualTimeScheduler backoffScheduler = VirtualTimeScheduler.create();
 
 		Exception exception = new IOException("boom retry");
 
 		StepVerifier.create(
 				Flux.concat(Flux.range(0, 2), Flux.error(exception))
-				    .log()
 				    .retryBackoff(4, Duration.ofHours(1), Duration.ofHours(1), 0, backoffScheduler)
-				.doOnNext(i -> System.out.println(i + " on " + Thread.currentThread().getName()))
 		)
 		            .expectNext(0, 1) //normal output
 		            .expectNoEvent(Duration.ofMillis(100))
@@ -705,7 +702,7 @@ public class FluxRetryWhenTest {
 
 	@Test
 	public void fluxRetryBackoffRetriesOnGivenScheduler() {
-		//the fluxRetryBackoffWithGivenScheduler above is not suitable to verify the retry scheduler, as VTS is akin to immediate()
+		//the fluxRetryBackoffWithSpecificScheduler above is not suitable to verify the retry scheduler, as VTS is akin to immediate()
 		//and doesn't really change the Thread
 		Scheduler backoffScheduler = Schedulers.newSingle("backoffScheduler");
 		String main = Thread.currentThread().getName();
@@ -733,10 +730,66 @@ public class FluxRetryWhenTest {
 	}
 
 	@Test
-	public void resetBackoffFunction() {
-		AtomicInteger resetCounter = new AtomicInteger();
+	public void backoffFunctionNotTransient() {
+		Flux<Integer> source = transientErrorSource();
+
+		Function<Flux<Throwable>, Publisher<Long>> retryFunction =
+				FluxRetryWhen.randomExponentialBackoffFunction(2,
+						Duration.ZERO,
+						Duration.ofMillis(100),
+						0d,
+						Schedulers.parallel(),
+						false);
+
+		new FluxRetryWhen<>(source, retryFunction)
+				.as(StepVerifier::create)
+				.expectNext(3, 4)
+				.expectErrorMessage("Retries exhausted: 2/2")
+				.verify(Duration.ofSeconds(2));
+	}
+
+	@Test
+	public void backoffFunctionTransient() {
+		Flux<Integer> source = transientErrorSource();
+
+		Function<Flux<Throwable>, Publisher<Long>> retryFunction =
+				FluxRetryWhen.randomExponentialBackoffFunction(2,
+						Duration.ZERO,
+						Duration.ofMillis(100),
+						0d,
+						Schedulers.parallel(),
+						true);
+
+		new FluxRetryWhen<>(source, retryFunction)
+				.as(StepVerifier::create)
+				.expectNext(3, 4, 7, 8)
+				.expectComplete()
+				.verify(Duration.ofSeconds(2));
+	}
+
+	@Test
+	public void backoffFunctionTransientAndThenRemovesTransientNature() {
+		Flux<Integer> source = transientErrorSource();
+
+		Function<Flux<Throwable>, Publisher<Long>> retryFunction =
+				FluxRetryWhen.randomExponentialBackoffFunction(2,
+						Duration.ZERO,
+						Duration.ofMillis(100),
+						0d,
+						Schedulers.parallel(),
+						true)
+						.andThen(Function.identity());
+
+		new FluxRetryWhen<>(source, retryFunction)
+				.as(StepVerifier::create)
+				.expectNext(3, 4)
+				.expectErrorMessage("Retries exhausted: 2/2")
+				.verify(Duration.ofSeconds(2));
+	}
+
+	private Flux<Integer> transientErrorSource() {
 		AtomicInteger count = new AtomicInteger();
-		Flux<Integer> source = Flux.generate(sink -> {
+		return Flux.generate(sink -> {
 			int step = count.incrementAndGet();
 			switch (step) {
 				case 1:
@@ -759,25 +812,6 @@ public class FluxRetryWhenTest {
 					break;
 			}
 		});
-
-		Function<Flux<Throwable>, Publisher<Long>> retryFunction =
-				FluxRetryWhen.randomExponentialBackoffFunction(2,
-						Duration.ZERO,
-						Duration.ofMillis(100),
-						0d,
-						Schedulers.parallel())
-				.andThen(p -> {
-					resetCounter.incrementAndGet();
-					return p;
-				});
-
-		new FluxRetryWhen<>(source, retryFunction, true)
-				.as(StepVerifier::create)
-				.expectNext(3, 4, 7, 8)
-				.expectComplete()
-				.verify(Duration.ofSeconds(2));
-
-		assertThat(resetCounter).hasValue(3); //1 initial application then 2 resets
 	}
 
 	@Test

@@ -47,19 +47,11 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 	static final Duration MAX_BACKOFF = Duration.ofMillis(Long.MAX_VALUE);
 
 	final Function<? super Flux<Throwable>, ? extends Publisher<?>> whenSourceFactory;
-	final boolean resetOnNext;
 
 	FluxRetryWhen(Flux<? extends T> source,
 							  Function<? super Flux<Throwable>, ? extends Publisher<?>> whenSourceFactory) {
-		this(source, whenSourceFactory, false);
-	}
-
-	FluxRetryWhen(Flux<? extends T> source,
-							  Function<? super Flux<Throwable>, ? extends Publisher<?>> whenSourceFactory,
-			boolean resetOnNext) {
 		super(source);
 		this.whenSourceFactory = Objects.requireNonNull(whenSourceFactory, "whenSourceFactory");
-		this.resetOnNext = resetOnNext;
 	}
 
 	/**
@@ -70,9 +62,9 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 	 * @param <T> the type of the main sequence
 	 * @return true if the reset went well, false if an error was propagated to downstream
 	 */
-	static <T> boolean resetTrigger(@Nullable final RetryWhenOtherSubscriber other,
+	static <T> boolean tryResetTrigger(@Nullable final RetryWhenOtherSubscriber other,
 			@Nullable final CoreSubscriber<? super T> downstream,
-			@Nullable final Function<? super Flux<Throwable>, ? extends Publisher<?>> whenSourceFactory) {
+			@Nullable final Function<? super Flux<Throwable>, Publisher<Long>> whenSourceFactory) {
 		if (other == null || downstream == null || whenSourceFactory == null) {
 			return true;
 		}
@@ -91,7 +83,7 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 
 	static <T> void subscribe(CoreSubscriber<? super T> s,
 			Function<? super Flux<Throwable>, ? extends Publisher<?>> whenSourceFactory,
-			CorePublisher<? extends T> source, boolean resetOnNext) {
+			CorePublisher<? extends T> source) {
 		RetryWhenOtherSubscriber other = new RetryWhenOtherSubscriber();
 		Subscriber<Throwable> signaller = Operators.serialize(other.completionSignal);
 
@@ -100,19 +92,27 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 		CoreSubscriber<T> serial = Operators.serialize(s);
 
 		RetryWhenMainSubscriber<T> main;
-		if (resetOnNext) {
-			main = new RetryWhenMainSubscriber<>(serial, signaller, source, other, whenSourceFactory);
+		if (whenSourceFactory instanceof TransientResubscribeWhenFunction) {
+			Function<? super Flux<Throwable>, Publisher<Long>> transientFunction = (Function<? super Flux<Throwable>, Publisher<Long>>) whenSourceFactory;
+			main = new RetryWhenMainSubscriber<>(serial, signaller, source, other,transientFunction);
 		}
 		else {
-			main = new RetryWhenMainSubscriber<>(serial, signaller, source, null, null);
+			main = new RetryWhenMainSubscriber<>(serial, signaller, source);
 		}
-		other.main = main;
 
+		other.main = main;
 		serial.onSubscribe(main);
 
-		if (!resetTrigger(other, s, whenSourceFactory)) {
+		//this behavior is copied in `tryResetTrigger` for the transient case
+		Publisher<?> p;
+		try {
+			p = Objects.requireNonNull(whenSourceFactory.apply(other), "The whenSourceFactory returned a null Publisher");
+		}
+		catch (Throwable e) {
+			s.onError(Operators.onOperatorError(e, s.currentContext()));
 			return;
 		}
+		p.subscribe(other);
 
 		if (!main.cancelled) {
 			source.subscribe(main);
@@ -121,7 +121,7 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 
 	@Override
 	public CoreSubscriber<? super T> subscribeOrReturn(CoreSubscriber<? super T> actual) {
-		subscribe(actual, whenSourceFactory, source, resetOnNext);
+		subscribe(actual, whenSourceFactory, source);
 		return null;
 	}
 
@@ -135,7 +135,7 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 		final CorePublisher<? extends T> source;
 
 		@Nullable
-		final Function<? super Flux<Throwable>, ? extends Publisher<?>> whenSourceFactory;
+		final Function<? super Flux<Throwable>, Publisher<Long>> transientWhenSourceFactory;
 		@Nullable
 		final RetryWhenOtherSubscriber other;
 
@@ -156,15 +156,21 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 				Subscriber<Throwable> signaller,
 				CorePublisher<? extends T> source,
 				@Nullable RetryWhenOtherSubscriber other,
-				@Nullable Function<? super Flux<Throwable>, ? extends Publisher<?>> whenSourceFactory) {
+				@Nullable Function<? super Flux<Throwable>, Publisher<Long>> transientWhenSourceFactory) {
 			super(actual);
 			this.signaller = signaller;
 			this.source = source;
 			this.otherArbiter = new Operators.SwapSubscription(true);
 			this.context = actual.currentContext();
 			this.other = other;
-			this.whenSourceFactory = whenSourceFactory;
+			this.transientWhenSourceFactory = transientWhenSourceFactory;
 			this.resetTriggerOnNextElement = false;
+		}
+
+		RetryWhenMainSubscriber(CoreSubscriber<? super T> actual,
+				Subscriber<Throwable> signaller,
+				CorePublisher<? extends T> source) {
+			this(actual, signaller, source, null, null);
 		}
 
 		@Override
@@ -193,7 +199,7 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 		public void onNext(T t) {
 			if (resetTriggerOnNextElement) {
 				resetTriggerOnNextElement = false; //we don't want to reset for subsequent onNext
-				if (!FluxRetryWhen.resetTrigger(other, actual, whenSourceFactory)) {
+				if (!FluxRetryWhen.tryResetTrigger(other, actual, transientWhenSourceFactory)) {
 					return;
 				}
 			}
@@ -316,64 +322,72 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 		}
 	}
 
+	@FunctionalInterface
+	interface TransientResubscribeWhenFunction<T> extends Function<Flux<T>, Publisher<Long>> {
+	}
+
 	static Function<Flux<Throwable>, Publisher<Long>> randomExponentialBackoffFunction(
 			long numRetries, Duration firstBackoff, Duration maxBackoff,
-			double jitterFactor, Scheduler backoffScheduler) {
+			double jitterFactor, Scheduler backoffScheduler,
+			boolean isTransient) {
 		if (jitterFactor < 0 || jitterFactor > 1) throw new IllegalArgumentException("jitterFactor must be between 0 and 1 (default 0.5)");
 		Objects.requireNonNull(firstBackoff, "firstBackoff is required");
 		Objects.requireNonNull(maxBackoff, "maxBackoff is required");
 		Objects.requireNonNull(backoffScheduler, "backoffScheduler is required");
 
-		return t -> t.index()
-		             .flatMap(t2 -> {
-			             long iteration = t2.getT1();
+		TransientResubscribeWhenFunction<Throwable> function = t ->
+				t.index()
+				 .flatMap(t2 -> {
+					 long iteration = t2.getT1();
 
-			             if (iteration >= numRetries) {
-				             return Mono.<Long>error(new IllegalStateException("Retries exhausted: " + iteration + "/" + numRetries, t2.getT2()));
-			             }
+					 if (iteration >= numRetries) {
+						 return Mono.<Long>error(new IllegalStateException("Retries exhausted: " + iteration + "/" + numRetries, t2.getT2()));
+					 }
 
-			             Duration nextBackoff;
-			             try {
-				             nextBackoff = firstBackoff.multipliedBy((long) Math.pow(2, iteration));
-				             if (nextBackoff.compareTo(maxBackoff) > 0) {
-					             nextBackoff = maxBackoff;
-				             }
-			             }
-			             catch (ArithmeticException overflow) {
-				             nextBackoff = maxBackoff;
-			             }
+					 Duration nextBackoff;
+					 try {
+						 nextBackoff = firstBackoff.multipliedBy((long) Math.pow(2, iteration));
+						 if (nextBackoff.compareTo(maxBackoff) > 0) {
+							 nextBackoff = maxBackoff;
+						 }
+					 }
+					 catch (ArithmeticException overflow) {
+						 nextBackoff = maxBackoff;
+					 }
 
-			             //short-circuit delay == 0 case
-			             if (nextBackoff.isZero()) {
-				             return Mono.just(iteration);
-			             }
+					 //short-circuit delay == 0 case
+					 if (nextBackoff.isZero()) {
+						 return Mono.just(iteration);
+					 }
 
-			             ThreadLocalRandom random = ThreadLocalRandom.current();
+					 ThreadLocalRandom random = ThreadLocalRandom.current();
 
-			             long jitterOffset;
-			             try {
-				             jitterOffset = nextBackoff.multipliedBy((long) (100 * jitterFactor))
-				                                       .dividedBy(100)
-				                                       .toMillis();
-			             }
-			             catch (ArithmeticException ae) {
-				             jitterOffset = Math.round(Long.MAX_VALUE * jitterFactor);
-			             }
-			             long lowBound = Math.max(firstBackoff.minus(nextBackoff)
-			                                                  .toMillis(), -jitterOffset);
-			             long highBound = Math.min(maxBackoff.minus(nextBackoff)
-			                                                 .toMillis(), jitterOffset);
+					 long jitterOffset;
+					 try {
+						 jitterOffset = nextBackoff.multipliedBy((long) (100 * jitterFactor))
+						                           .dividedBy(100)
+						                           .toMillis();
+					 }
+					 catch (ArithmeticException ae) {
+						 jitterOffset = Math.round(Long.MAX_VALUE * jitterFactor);
+					 }
+					 long lowBound = Math.max(firstBackoff.minus(nextBackoff)
+					                                      .toMillis(), -jitterOffset);
+					 long highBound = Math.min(maxBackoff.minus(nextBackoff)
+					                                     .toMillis(), jitterOffset);
 
-			             long jitter;
-			             if (highBound == lowBound) {
-				             if (highBound == 0) jitter = 0;
-				             else jitter = random.nextLong(highBound);
-			             }
-			             else {
-				             jitter = random.nextLong(lowBound, highBound);
-			             }
-			             Duration effectiveBackoff = nextBackoff.plusMillis(jitter);
-			             return Mono.delay(effectiveBackoff, backoffScheduler);
-		             });
+					 long jitter;
+					 if (highBound == lowBound) {
+						 if (highBound == 0) jitter = 0;
+						 else jitter = random.nextLong(highBound);
+					 }
+					 else {
+						 jitter = random.nextLong(lowBound, highBound);
+					 }
+					 Duration effectiveBackoff = nextBackoff.plusMillis(jitter);
+					 return Mono.delay(effectiveBackoff, backoffScheduler);
+				 });
+		if (isTransient) return function;
+		return function::apply; //do not replace with qualifier, so that instanceof doesn't consider this one transient
 	}
 }

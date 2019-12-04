@@ -3694,32 +3694,6 @@ public abstract class Mono<T> implements CorePublisher<T> {
 	}
 
 	/**
-	 * Retries this {@link Mono} when a companion sequence signals
-	 * an item in response to this {@link Mono} error signal
-	 * <p>If the companion sequence signals when the {@link Mono} is active, the retry
-	 * attempt is suppressed and any terminal signal will terminate the {@link Mono} source with the same signal
-	 * immediately.
-	 *
-	 * <p>
-	 * <img class="marble" src="doc-files/marbles/retryWhenForMono.svg" alt="">
-	 * <p>
-	 * Note that if the companion {@link Publisher} created by the {@code whenFactory}
-	 * emits {@link Context} as trigger objects, the content of these Context will be added
-	 * to the operator's own {@link Context}.
-	 *
-	 * @param whenFactory the {@link Function} that returns the associated {@link Publisher}
-	 * companion, given a {@link Flux} that signals each onError as a {@link Throwable}.
-	 * @param resetOnNext true to re-apply the factory the first time an element is received <strong>after</strong> a retry.
-	 * this can help with transient errors in long-lived Flux
-	 *
-	 * @return a {@link Mono} that retries on onError when the companion {@link Publisher} produces an
-	 * onNext signal
-	 */
-	public final Mono<T> retryWhen(Function<Flux<Throwable>, ? extends Publisher<?>> whenFactory, boolean resetOnNext) {
-		return onAssembly(new MonoRetryWhen<>(this, whenFactory, resetOnNext));
-	}
-
-	/**
 	 * In case of error, retry this {@link Mono} up to {@code numRetries} times using a
 	 * randomized exponential backoff strategy (jitter). The jitter factor is {@code 50%}
 	 * but the effective backoff delay cannot be less than {@code firstBackoff}.
@@ -3903,7 +3877,7 @@ public abstract class Mono<T> implements CorePublisher<T> {
 	 * @return a {@link Mono} that retries on onError with exponentially growing randomized delays between retries.
 	 */
 	public final Mono<T> retryBackoff(long numRetries, Duration firstBackoff, Duration maxBackoff, double jitterFactor, Scheduler backoffScheduler) {
-		return retryWhen(FluxRetryWhen.randomExponentialBackoffFunction(numRetries, firstBackoff, maxBackoff, jitterFactor, backoffScheduler));
+		return retryBackoff(numRetries, firstBackoff, maxBackoff, jitterFactor, backoffScheduler, false);
 	}
 
 	/**
@@ -3947,7 +3921,7 @@ public abstract class Mono<T> implements CorePublisher<T> {
 	 * @return a {@link Mono} that retries on onError with exponentially growing randomized delays between retries.
 	 */
 	public final Mono<T> retryBackoff(long numRetries, Duration firstBackoff, Duration maxBackoff, double jitterFactor, Scheduler backoffScheduler, boolean resetOnNext) {
-		return retryWhen(FluxRetryWhen.randomExponentialBackoffFunction(numRetries, firstBackoff, maxBackoff, jitterFactor, backoffScheduler), resetOnNext);
+		return retryWhen(FluxRetryWhen.randomExponentialBackoffFunction(numRetries, firstBackoff, maxBackoff, jitterFactor, backoffScheduler, resetOnNext));
 	}
 
 	/**
