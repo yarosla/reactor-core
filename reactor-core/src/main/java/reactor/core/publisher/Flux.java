@@ -7231,6 +7231,13 @@ public abstract class Flux<T> implements CorePublisher<T> {
 				Retry.State::failure))));
 	}
 
+	/**
+	 * Retries this {@link Flux} in case of errors, as configured by the {@link Retry.Builder} passed.
+	 *
+	 * @param builder the {@link Retry.Builder} to configure retries
+	 * @return a {@link Flux} that retries on onError
+	 * @see Retry.Builder
+	 */
 	public final Flux<T> retry(Retry.Builder builder) {
 		return onAssembly(new FluxRetryWhen<>(this, builder.build()));
 	}

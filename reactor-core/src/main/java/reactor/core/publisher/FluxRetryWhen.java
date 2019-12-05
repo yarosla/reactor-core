@@ -131,6 +131,7 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 
 		@Override
 		public Throwable failure() {
+			assert this.lastFailure != null;
 			return this.lastFailure;
 		}
 

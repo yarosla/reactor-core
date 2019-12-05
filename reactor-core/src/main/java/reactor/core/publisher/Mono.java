@@ -3695,8 +3695,15 @@ public abstract class Mono<T> implements CorePublisher<T> {
 		return onAssembly(new MonoRetryWhen<>(this, (Flux<Retry.State> rws) -> whenFactory.apply(rws.map(Retry.State::failure))));
 	}
 
-	public final Mono<T> retry(Retry.Builder retryBuilder) {
-		return onAssembly(new MonoRetryWhen<>(this, retryBuilder.build()));
+	/**
+	 * Retries this {@link Mono} in case of errors, as configured by the {@link Retry.Builder} passed.
+	 *
+	 * @param builder the {@link Retry.Builder} to configure retries
+	 * @return a {@link Mono} that retries on onError
+	 * @see Retry.Builder
+	 */
+	public final Mono<T> retry(Retry.Builder builder) {
+		return onAssembly(new MonoRetryWhen<>(this, builder.build()));
 	}
 
 	/**
