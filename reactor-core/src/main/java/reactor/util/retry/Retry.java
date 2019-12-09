@@ -20,6 +20,7 @@ import java.time.Duration;
 import java.util.Objects;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 import org.reactivestreams.Publisher;
 
@@ -30,7 +31,7 @@ import reactor.util.annotation.Nullable;
 
 /**
  * Utilities around {@link Flux#retry(Builder) retries} (builder to configure retries,
- * retry {@link State}, etc...
+ * retry {@link RetrySignal signal}, etc...)
  *
  * @author Simon Baslé
  */
@@ -45,7 +46,7 @@ public class Retry {
 	 * errors that happened so far (and were retried) and the same number, but only taking into account
 	 * <strong>subsequent</strong> errors (see {@link #failureSubsequentIndex()}).
 	 */
-	public interface State {
+	public interface RetrySignal {
 
 		/**
 		 * The ZERO BASED index number of this error (can also be read as how many retries have occurred
@@ -70,6 +71,17 @@ public class Retry {
 		 * @return the current failure {@link Throwable}
 		 */
 		Throwable failure();
+
+		/**
+		 * If this {@link RetrySignal} is a transient view of the state of the underlying retry subscriber,
+		 * return an immutable copy of that view that is guaranteed to be consistent with the time at which
+		 * this method is invoked.
+		 *
+		 * @return an immutable copy of the current {@link RetrySignal}, always safe to use
+		 */
+		default RetrySignal retain() {
+			return new ImmutableRetrySignal(failureTotalIndex(), failureSubsequentIndex(), failure());
+		}
 	}
 
 	/**
@@ -119,7 +131,7 @@ public class Retry {
 	 * The {@link Builder} is copy-on-write and as such can be stored as a "template" and further configured
 	 * by different components without a risk of modifying the original configuration.
 	 */
-	public static class Builder {
+	public static class Builder implements Supplier<Function<Flux<RetrySignal>, Publisher<?>>> {
 
 		final Duration minBackoff;
 		final Duration maxBackoff;
@@ -220,7 +232,7 @@ public class Retry {
 
 		/**
 		 * Set the transient error mode, indicating that the strategy being built should use
-		 * {@link State#failureSubsequentIndex()} rather than {@link State#failureTotalIndex()}.
+		 * {@link RetrySignal#failureSubsequentIndex()} rather than {@link RetrySignal#failureTotalIndex()}.
 		 * Transient errors are errors that could occur in bursts but are then recovered from by
 		 * a retry (with one or more onNext signals) before another error occurs.
 		 * <p>
@@ -324,16 +336,49 @@ public class Retry {
 		}
 
 		/**
-		 * Build the configured retry strategy as a {@link Function} taking a companion {@link Flux} of
-		 * {@link State retry state} and outputting a {@link Publisher} that emits to signal a retry is allowed.
+		 * Build the configured retry strategy.
 		 *
-		 * @return the retry {@link Function} based on a companion flux of {@link State}
+		 * @return the retry {@link Function} based on a companion flux of {@link RetrySignal}
 		 */
-		public Function<Flux<State>, Publisher<?>> build() {
+		public Function<Flux<RetrySignal>, Publisher<?>> get() {
 			if (minBackoff == Duration.ZERO && maxBackoff == MAX_BACKOFF && jitterFactor == 0d && backoffScheduler == null) {
 				return new SimpleRetryFunction(this);
 			}
 			return new ExponentialBackoffFunction(this);
+		}
+	}
+
+	static class ImmutableRetrySignal implements RetrySignal {
+
+		final long failureTotalIndex;
+		final long failureSubsequentIndex;
+		final Throwable failure;
+
+		ImmutableRetrySignal(long failureTotalIndex, long failureSubsequentIndex,
+				Throwable failure) {
+			this.failureTotalIndex = failureTotalIndex;
+			this.failureSubsequentIndex = failureSubsequentIndex;
+			this.failure = failure;
+		}
+
+		@Override
+		public long failureTotalIndex() {
+			return this.failureTotalIndex;
+		}
+
+		@Override
+		public long failureSubsequentIndex() {
+			return this.failureSubsequentIndex;
+		}
+
+		@Override
+		public Throwable failure() {
+			return this.failure;
+		}
+
+		@Override
+		public RetrySignal retain() {
+			return this;
 		}
 	}
 }

@@ -24,7 +24,8 @@ import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
-import reactor.util.retry.Retry.State;
+import reactor.core.scheduler.Schedulers;
+import reactor.util.retry.Retry.RetrySignal;
 
 class ExponentialBackoffFunction extends SimpleRetryFunction {
 
@@ -39,22 +40,23 @@ class ExponentialBackoffFunction extends SimpleRetryFunction {
 		if (jitterFactor < 0 || jitterFactor > 1) throw new IllegalArgumentException("jitterFactor must be between 0 and 1 (default 0.5)");
 		this.firstBackoff = builder.minBackoff;
 		this.maxBackoff = builder.maxBackoff;
-		this.backoffScheduler = builder.backoffScheduler;
+		this.backoffScheduler = builder.backoffScheduler == null ? Schedulers.parallel() : builder.backoffScheduler;
 	}
 
 	@Override
-	public Publisher<?> apply(Flux<State> t) {
+	public Publisher<?> apply(Flux<RetrySignal> t) {
 		return t.flatMap(retryWhenState -> {
+			//capture the state immediately
 			Throwable currentFailure = retryWhenState.failure();
+			long iteration = isTransientErrors ? retryWhenState.failureSubsequentIndex() : retryWhenState.failureTotalIndex();
+
 			if (currentFailure == null) {
-				return Mono.error(new IllegalStateException("Retry.State#failure() not expected to be null"));
+				return Mono.error(new IllegalStateException("Retry.RetrySignal#failure() not expected to be null"));
 			}
 
 			if (!throwablePredicate.test(currentFailure)) {
 				return Mono.error(currentFailure);
 			}
-
-			long iteration = isTransientErrors ? retryWhenState.failureSubsequentIndex() : retryWhenState.failureTotalIndex();
 
 			if (iteration >= maxAttempts) {
 				return Mono.error(new IllegalStateException("Retries exhausted: " + iteration + "/" + maxAttempts, currentFailure));

@@ -3692,18 +3692,29 @@ public abstract class Mono<T> implements CorePublisher<T> {
 	 */
 	public final Mono<T> retryWhen(Function<Flux<Throwable>, ? extends Publisher<?>> whenFactory) {
 		Objects.requireNonNull(whenFactory, "whenFactory");
-		return onAssembly(new MonoRetryWhen<>(this, (Flux<Retry.State> rws) -> whenFactory.apply(rws.map(Retry.State::failure))));
+		return onAssembly(new MonoRetryWhen<>(this, (Flux<Retry.RetrySignal> rws) -> whenFactory.apply(rws.map(
+				Retry.RetrySignal::failure))));
 	}
 
 	/**
-	 * Retries this {@link Mono} in case of errors, as configured by the {@link Retry.Builder} passed.
+	 * Retries this {@link Mono} in case of errors, as configured by the {@link Function} supplied
+	 * (typically a {@link Retry.Builder}, or a custom function derived from a companion flux of
+	 * {@link Retry.RetrySignal}). The output is a {@link Publisher} that can emit an arbitrary object
+	 * to signal a retry is allowed, and when the resubscription must occur.
+	 * <p>
+	 * Note that the {@link Retry.RetrySignal} state can be transient and change between each source
+	 * {@link org.reactivestreams.Subscriber#onError(Throwable) onError} or
+	 * {@link org.reactivestreams.Subscriber#onNext(Object) onNext}. If processed with a delay,
+	 * this could lead to the represented state being out of sync with the state at which the retry
+	 * was evaluated. Map it to {@link Retry.RetrySignal#retain()} right away to mediate this.
 	 *
-	 * @param builder the {@link Retry.Builder} to configure retries
-	 * @return a {@link Mono} that retries on onError
+	 * @param strategySupplier a supplier of a retry {@link Function}, typically a {@link Retry.Builder} to configure retries
+	 * @return a {@link Flux} that retries on onError
 	 * @see Retry.Builder
+	 * @see Retry.Builder#get()
 	 */
-	public final Mono<T> retry(Retry.Builder builder) {
-		return onAssembly(new MonoRetryWhen<>(this, builder.build()));
+	public final Mono<T> retry(Supplier<Function<Flux<Retry.RetrySignal>, Publisher<?>>> strategySupplier) {
+		return onAssembly(new MonoRetryWhen<>(this, strategySupplier.get()));
 	}
 
 	/**

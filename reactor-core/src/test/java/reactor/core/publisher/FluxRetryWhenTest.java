@@ -366,7 +366,7 @@ public class FluxRetryWhenTest {
 	@Test
 	public void inners() {
 		CoreSubscriber<Integer> actual = new LambdaSubscriber<>(null, e -> {}, null, null);
-		CoreSubscriber<Retry.State> signaller = new LambdaSubscriber<>(null, e -> {}, null, null);
+		CoreSubscriber<Retry.RetrySignal> signaller = new LambdaSubscriber<>(null, e -> {}, null, null);
 		Flux<Integer> when = Flux.empty();
 		FluxRetryWhen.RetryWhenMainSubscriber<Integer> main = new FluxRetryWhen
 				.RetryWhenMainSubscriber<>(actual, signaller, when);
@@ -733,12 +733,12 @@ public class FluxRetryWhenTest {
 	public void backoffFunctionNotTransient() {
 		Flux<Integer> source = transientErrorSource();
 
-		Function<Flux<Retry.State>, Publisher<?>> retryFunction =
+		Function<Flux<Retry.RetrySignal>, Publisher<?>> retryFunction =
 				Retry.backoff(2, Duration.ZERO)
 				     .maxBackoff(Duration.ofMillis(100))
 				     .jitter(0d)
 				     .transientErrors(false)
-				     .build();
+				     .get();
 
 		new FluxRetryWhen<>(source, retryFunction)
 				.as(StepVerifier::create)
@@ -751,12 +751,12 @@ public class FluxRetryWhenTest {
 	public void backoffFunctionTransient() {
 		Flux<Integer> source = transientErrorSource();
 
-		Function<Flux<Retry.State>, Publisher<?>> retryFunction =
+		Function<Flux<Retry.RetrySignal>, Publisher<?>> retryFunction =
 				Retry.backoff(2, Duration.ZERO)
 				     .maxBackoff(Duration.ofMillis(100))
 				     .jitter(0d)
 				     .transientErrors(true)
-				     .build();
+				     .get();
 
 		new FluxRetryWhen<>(source, retryFunction)
 				.as(StepVerifier::create)
@@ -769,12 +769,12 @@ public class FluxRetryWhenTest {
 	public void backoffFunctionTransientAndThenDoesntRemoveTransientNature() {
 		Flux<Integer> source = transientErrorSource();
 
-		Function<Flux<Retry.State>, Publisher<?>> retryFunction =
+		Function<Flux<Retry.RetrySignal>, Publisher<?>> retryFunction =
 				Retry.backoff(2, Duration.ZERO)
 				     .maxBackoff(Duration.ofMillis(100))
 				     .jitter(0d)
 				     .transientErrors(true)
-				     .build()
+				     .get()
 				     .andThen(Function.identity());
 
 		new FluxRetryWhen<>(source, retryFunction)

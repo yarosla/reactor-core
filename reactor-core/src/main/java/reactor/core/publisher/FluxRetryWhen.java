@@ -43,18 +43,18 @@ import reactor.util.retry.Retry;
  */
 final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 
-	final Function<? super Flux<Retry.State>, ? extends Publisher<?>> whenSourceFactory;
+	final Function<? super Flux<Retry.RetrySignal>, ? extends Publisher<?>> whenSourceFactory;
 
-	FluxRetryWhen(Flux<? extends T> source, Function<? super Flux<Retry.State>, ? extends Publisher<?>> whenSourceFactory) {
+	FluxRetryWhen(Flux<? extends T> source, Function<? super Flux<Retry.RetrySignal>, ? extends Publisher<?>> whenSourceFactory) {
 		super(source);
 		this.whenSourceFactory = Objects.requireNonNull(whenSourceFactory, "whenSourceFactory");
 	}
 
 	static <T> void subscribe(CoreSubscriber<? super T> s,
-			Function<? super Flux<Retry.State>, ? extends Publisher<?>> whenSourceFactory,
+			Function<? super Flux<Retry.RetrySignal>, ? extends Publisher<?>> whenSourceFactory,
 			CorePublisher<? extends T> source) {
 		RetryWhenOtherSubscriber other = new RetryWhenOtherSubscriber();
-		Subscriber<Retry.State> signaller = Operators.serialize(other.completionSignal);
+		Subscriber<Retry.RetrySignal> signaller = Operators.serialize(other.completionSignal);
 
 		signaller.onSubscribe(Operators.emptySubscription());
 
@@ -88,11 +88,11 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 	}
 
 	static final class RetryWhenMainSubscriber<T> extends Operators.MultiSubscriptionSubscriber<T, T>
-			implements Retry.State {
+			implements Retry.RetrySignal {
 
 		final Operators.SwapSubscription otherArbiter;
 
-		final Subscriber<Retry.State> signaller;
+		final Subscriber<Retry.RetrySignal> signaller;
 
 		final CorePublisher<? extends T> source;
 
@@ -110,7 +110,7 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 		long produced;
 		
 		RetryWhenMainSubscriber(CoreSubscriber<? super T> actual,
-				Subscriber<Retry.State> signaller,
+				Subscriber<Retry.RetrySignal> signaller,
 				CorePublisher<? extends T> source) {
 			super(actual);
 			this.signaller = signaller;
@@ -221,11 +221,11 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 		}
 	}
 
-	static final class RetryWhenOtherSubscriber extends Flux<Retry.State>
-	implements InnerConsumer<Object>, OptimizableOperator<Retry.State, Retry.State> {
+	static final class RetryWhenOtherSubscriber extends Flux<Retry.RetrySignal>
+	implements InnerConsumer<Object>, OptimizableOperator<Retry.RetrySignal, Retry.RetrySignal> {
 		RetryWhenMainSubscriber<?> main;
 
-		final DirectProcessor<Retry.State> completionSignal = new DirectProcessor<>();
+		final DirectProcessor<Retry.RetrySignal> completionSignal = new DirectProcessor<>();
 
 		@Override
 		public Context currentContext() {
@@ -262,22 +262,22 @@ final class FluxRetryWhen<T> extends InternalFluxOperator<T, T> {
 		}
 
 		@Override
-		public void subscribe(CoreSubscriber<? super Retry.State> actual) {
+		public void subscribe(CoreSubscriber<? super Retry.RetrySignal> actual) {
 			completionSignal.subscribe(actual);
 		}
 
 		@Override
-		public CoreSubscriber<? super Retry.State> subscribeOrReturn(CoreSubscriber<? super Retry.State> actual) {
+		public CoreSubscriber<? super Retry.RetrySignal> subscribeOrReturn(CoreSubscriber<? super Retry.RetrySignal> actual) {
 			return actual;
 		}
 
 		@Override
-		public DirectProcessor<Retry.State> source() {
+		public DirectProcessor<Retry.RetrySignal> source() {
 			return completionSignal;
 		}
 
 		@Override
-		public OptimizableOperator<?, ? extends Retry.State> nextOptimizableSource() {
+		public OptimizableOperator<?, ? extends Retry.RetrySignal> nextOptimizableSource() {
 			return null;
 		}
 	}

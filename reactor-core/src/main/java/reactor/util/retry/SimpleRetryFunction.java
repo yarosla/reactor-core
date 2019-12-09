@@ -23,9 +23,8 @@ import org.reactivestreams.Publisher;
 
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-import reactor.util.retry.Retry.State;
 
-class SimpleRetryFunction implements Function<Flux<State>, Publisher<?>> {
+class SimpleRetryFunction implements Function<Flux<Retry.RetrySignal>, Publisher<?>> {
 
 	final long                         maxAttempts;
 	final Predicate<? super Throwable> throwablePredicate;
@@ -38,9 +37,12 @@ class SimpleRetryFunction implements Function<Flux<State>, Publisher<?>> {
 	}
 
 	@Override
-	public Publisher<?> apply(Flux<Retry.State> flux) {
+	public Publisher<?> apply(Flux<Retry.RetrySignal> flux) {
 		return flux.flatMap(retryWhenState -> {
+			//capture the state immediately
 			Throwable currentFailure = retryWhenState.failure();
+			long iteration = isTransientErrors ? retryWhenState.failureSubsequentIndex() : retryWhenState.failureTotalIndex();
+
 			if (currentFailure == null) {
 				return Mono.error(new IllegalStateException("RetryWhenState#failure() not expected to be null"));
 			}
@@ -48,8 +50,6 @@ class SimpleRetryFunction implements Function<Flux<State>, Publisher<?>> {
 			if (!throwablePredicate.test(currentFailure)) {
 				return Mono.error(currentFailure);
 			}
-
-			long iteration = isTransientErrors ? retryWhenState.failureSubsequentIndex() : retryWhenState.failureTotalIndex();
 
 			if (iteration >= maxAttempts) {
 				return Mono.error(new IllegalStateException("Retries exhausted: " + iteration + "/" + maxAttempts, currentFailure));

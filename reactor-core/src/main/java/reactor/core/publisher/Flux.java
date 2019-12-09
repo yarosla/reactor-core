@@ -7228,18 +7228,28 @@ public abstract class Flux<T> implements CorePublisher<T> {
 	public final Flux<T> retryWhen(Function<Flux<Throwable>, ? extends Publisher<?>> whenFactory) {
 		Objects.requireNonNull(whenFactory, "whenFactory");
 		return onAssembly(new FluxRetryWhen<>(this, fluxRetryWhenState -> whenFactory.apply(fluxRetryWhenState.map(
-				Retry.State::failure))));
+				Retry.RetrySignal::failure))));
 	}
 
 	/**
-	 * Retries this {@link Flux} in case of errors, as configured by the {@link Retry.Builder} passed.
+	 * Retries this {@link Flux} in case of errors, as configured by the {@link Function} supplied
+	 * (typically a {@link Retry.Builder}, or a custom function derived from a companion flux of
+	 * {@link Retry.RetrySignal}). The output is a {@link Publisher} that can emit an arbitrary object
+	 * to signal a retry is allowed, and when the resubscription must occur.
+	 * <p>
+	 * Note that the {@link Retry.RetrySignal} state can be transient and change between each source
+	 * {@link org.reactivestreams.Subscriber#onError(Throwable) onError} or
+	 * {@link org.reactivestreams.Subscriber#onNext(Object) onNext}. If processed with a delay,
+	 * this could lead to the represented state being out of sync with the state at which the retry
+	 * was evaluated. Map it to {@link Retry.RetrySignal#retain()} right away to mediate this.
 	 *
-	 * @param builder the {@link Retry.Builder} to configure retries
+	 * @param strategySupplier a supplier of a retry {@link Function}, typically a {@link Retry.Builder} to configure retries
 	 * @return a {@link Flux} that retries on onError
 	 * @see Retry.Builder
+	 * @see Retry.Builder#get()
 	 */
-	public final Flux<T> retry(Retry.Builder builder) {
-		return onAssembly(new FluxRetryWhen<>(this, builder.build()));
+	public final Flux<T> retry(Supplier<Function<Flux<Retry.RetrySignal>, Publisher<?>>> strategySupplier) {
+		return onAssembly(new FluxRetryWhen<>(this, strategySupplier.get()));
 	}
 
 	/**
