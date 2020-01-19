@@ -16,10 +16,11 @@
 
 package reactor.core.publisher;
 
+import static org.assertj.core.api.Java6Assertions.assertThat;
+
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.function.Function;
@@ -28,17 +29,15 @@ import java.util.stream.IntStream;
 
 import org.junit.Test;
 import org.reactivestreams.Subscription;
+
 import reactor.core.CoreSubscriber;
 import reactor.core.Fuseable;
 import reactor.core.Scannable;
-import reactor.core.Scannable.Attr;
 import reactor.core.Scannable.Attr;
 import reactor.test.StepVerifier;
 import reactor.test.publisher.FluxOperatorTest;
 import reactor.test.subscriber.AssertSubscriber;
 import reactor.util.concurrent.Queues;
-
-import static org.assertj.core.api.Java6Assertions.assertThat;
 
 public class FluxFlattenIterableTest extends FluxOperatorTest<String, String> {
 
@@ -117,10 +116,10 @@ public class FluxFlattenIterableTest extends FluxOperatorTest<String, String> {
 				scenario(f -> f.flatMapIterable(s -> Arrays.asList(s))),
 
 				scenario(f -> f.flatMapIterable(s -> Arrays.asList(s), 1))
-					.prefetch(1),
+						.prefetch(1),
 
 				scenario(f -> f.flatMapIterable(s -> new ArrayList<>()))
-					.receiverEmpty(),
+						.receiverEmpty(),
 
 				scenario(f -> f.flatMapIterable(s -> Arrays.asList(s, s + s)))
 						.receiveValues(
@@ -140,7 +139,7 @@ public class FluxFlattenIterableTest extends FluxOperatorTest<String, String> {
 	@Test(expected=IllegalArgumentException.class)
 	public void failPrefetch(){
 		Flux.never()
-	        .flatMapIterable(t -> null, -1);
+		    .flatMapIterable(t -> null, -1);
 	}
 
 	@Test
@@ -302,7 +301,7 @@ public class FluxFlattenIterableTest extends FluxOperatorTest<String, String> {
 		StepVerifier.create(Flux.just(1, 2)
 		                        .flatMapIterable(t -> IntStream.rangeClosed(0, 35).boxed().collect(Collectors.toList()))
 		                        .hide()
-                                .zipWith(Flux.range(1000, 100))
+		                        .zipWith(Flux.range(1000, 100))
 		                        .count())
 		            .expectNext(72L)
 		            .verifyComplete();
@@ -328,72 +327,196 @@ public class FluxFlattenIterableTest extends FluxOperatorTest<String, String> {
 	@Test
 	public void testPublishingTwice() {
 		StepVerifier.create(Flux.just(Flux.range(0, 300).toIterable(), Flux.range(0, 300).toIterable())
-				.flatMapIterable(x -> x)
-				.share()
-				.share()
-				.count())
-				.expectNext(600L)
-				.verifyComplete();
+		                        .flatMapIterable(x -> x)
+		                        .share()
+		                        .share()
+		                        .count())
+		            .expectNext(600L)
+		            .verifyComplete();
 	}
 
-    @Test
-    public void scanOperator() {
-        Flux<Integer> source = Flux.range(1, 10).map(i -> i - 1);
+	@Test
+	public void scanOperator() {
+		Flux<Integer> source = Flux.range(1, 10).map(i -> i - 1);
 
-        FluxFlattenIterable<Integer, Integer> test = new FluxFlattenIterable<>(source, i -> new ArrayList<>(i), 35, Queues.one());
+		FluxFlattenIterable<Integer, Integer> test = new FluxFlattenIterable<>(source, i -> new ArrayList<>(i), 35, Queues.one());
 
-        assertThat(test.scan(Scannable.Attr.PARENT)).isSameAs(source);
-        assertThat(test.scan(Attr.PREFETCH)).isEqualTo(35);
-    }
+		assertThat(test.scan(Scannable.Attr.PARENT)).isSameAs(source);
+		assertThat(test.scan(Attr.PREFETCH)).isEqualTo(35);
+	}
 
-    @Test
-    public void scanSubscriber() {
-        CoreSubscriber<Integer> actual = new LambdaSubscriber<>(null, e -> {}, null, null);
-        FluxFlattenIterable.FlattenIterableSubscriber<Integer, Integer> test =
-                new FluxFlattenIterable.FlattenIterableSubscriber<>(actual, i -> new ArrayList<>(i), 123, Queues.<Integer>one());
-        Subscription s = Operators.emptySubscription();
-        test.onSubscribe(s);
+	@Test
+	public void scanSubscriber() {
+		CoreSubscriber<Integer> actual = new LambdaSubscriber<>(null, e -> {}, null, null);
+		FluxFlattenIterable.FlattenIterableSubscriber<Integer, Integer> test =
+				new FluxFlattenIterable.FlattenIterableSubscriber<>(actual, i -> new ArrayList<>(i), 123, Queues.<Integer>one());
+		Subscription s = Operators.emptySubscription();
+		test.onSubscribe(s);
 
-        assertThat(test.scan(Scannable.Attr.PARENT)).isSameAs(s);
-        assertThat(test.scan(Scannable.Attr.ACTUAL)).isSameAs(actual);
-        assertThat(test.scan(Attr.PREFETCH)).isEqualTo(123);
-        test.requested = 35;
-        assertThat(test.scan(Attr.REQUESTED_FROM_DOWNSTREAM)).isEqualTo(35);
-        test.queue.add(5);
-        assertThat(test.scan(Attr.BUFFERED)).isEqualTo(1);
+		assertThat(test.scan(Scannable.Attr.PARENT)).isSameAs(s);
+		assertThat(test.scan(Scannable.Attr.ACTUAL)).isSameAs(actual);
+		assertThat(test.scan(Attr.PREFETCH)).isEqualTo(123);
+		test.requested = 35;
+		assertThat(test.scan(Attr.REQUESTED_FROM_DOWNSTREAM)).isEqualTo(35);
+		test.queue.add(5);
+		assertThat(test.scan(Attr.BUFFERED)).isEqualTo(1);
 
-        assertThat(test.scan(Scannable.Attr.ERROR)).isNull();
-        assertThat(test.scan(Scannable.Attr.TERMINATED)).isFalse();
-        test.error = new IllegalStateException("boom");
-        assertThat(test.scan(Scannable.Attr.ERROR)).hasMessage("boom");
-        test.onComplete();
-        assertThat(test.scan(Scannable.Attr.TERMINATED)).isTrue();
+		assertThat(test.scan(Scannable.Attr.ERROR)).isNull();
+		assertThat(test.scan(Scannable.Attr.TERMINATED)).isFalse();
+		test.error = new IllegalStateException("boom");
+		assertThat(test.scan(Scannable.Attr.ERROR)).hasMessage("boom");
+		test.onComplete();
+		assertThat(test.scan(Scannable.Attr.TERMINATED)).isTrue();
 
-        assertThat(test.scan(Scannable.Attr.CANCELLED)).isFalse();
-        test.cancel();
-        assertThat(test.scan(Scannable.Attr.CANCELLED)).isTrue();
+		assertThat(test.scan(Scannable.Attr.CANCELLED)).isFalse();
+		test.cancel();
+		assertThat(test.scan(Scannable.Attr.CANCELLED)).isTrue();
 
-    }
+	}
 
-    public void asyncDrainWithPollFailure() {
-	    Flux<Integer> p = Flux.range(1, 3)
-	                       .collectList()
-			               .filter(l -> { throw new IllegalStateException("boom"); })
-			               .flatMapIterable(Function.identity());
+	public void asyncDrainWithPollFailure() {
+		Flux<Integer> p = Flux.range(1, 3)
+		                      .collectList()
+		                      .filter(l -> { throw new IllegalStateException("boom"); })
+		                      .flatMapIterable(Function.identity());
 
-	    StepVerifier.create(p)
-	                .expectErrorMessage("boom")
-	                .verify(Duration.ofSeconds(1));
-    }
+		StepVerifier.create(p)
+		            .expectErrorMessage("boom")
+		            .verify(Duration.ofSeconds(1));
+	}
 
-    @Test
+	@Test
 	public void syncDrainWithPollFailure() {
-	    Flux<Integer> p = Mono.just(Arrays.asList(1, 2, 3))
-			    .filter(l -> { throw new IllegalStateException("boom"); })
-			    .flatMapIterable(Function.identity());
+		Flux<Integer> p = Mono.just(Arrays.asList(1, 2, 3))
+		                      .filter(l -> { throw new IllegalStateException("boom"); })
+		                      .flatMapIterable(Function.identity());
 
-	    StepVerifier.create(p)
-	                .expectErrorMessage("boom")
-	                .verify(Duration.ofSeconds(1));
-    }
+		StepVerifier.create(p)
+		            .expectErrorMessage("boom")
+		            .verify(Duration.ofSeconds(1));
+	}
+
+	@Test
+	public void errorModeContinueNullPublisherNotFused() {
+		Flux<Integer> test = Flux
+				.just(1, 2)
+				.hide()
+				.flatMapIterable(f -> {
+					if (f == 1) {
+						return null;
+					}
+					return Arrays.asList(f);
+				})
+				.onErrorContinue(OnNextFailureStrategyTest::drop);
+
+		StepVerifier.create(test)
+		            .expectNoFusionSupport()
+		            .expectNext(2)
+		            .expectComplete()
+		            .verifyThenAssertThat()
+		            .hasDropped(1)
+		            .hasDroppedErrors(1);
+	}
+
+	@Test
+	public void errorModeContinueInternalErrorNotFused() {
+		Flux<Integer> test = Flux
+				.just(1, 2)
+				.hide()
+				.flatMapIterable(f -> {
+					if (f == 1) {
+						throw new IllegalStateException("boom");
+					}
+					return Arrays.asList(f);
+				})
+				.onErrorContinue(OnNextFailureStrategyTest::drop);
+
+		StepVerifier.create(test)
+		            .expectNoFusionSupport()
+		            .expectNext(2)
+		            .expectComplete()
+		            .verifyThenAssertThat()
+		            .hasDropped(1)
+		            .hasDroppedErrors(1);
+	}
+
+	@Test
+	public void errorModeContinueSingleElementNotFused() {
+		Flux<Integer> test = Flux
+				.just(1)
+				.hide()
+				.flatMapIterable(f -> {
+					if (f == 1) {
+						throw new IllegalStateException("boom");
+					}
+					return Arrays.asList(f);
+				})
+				.onErrorContinue(OnNextFailureStrategyTest::drop);
+
+		StepVerifier.create(test)
+		            .expectNoFusionSupport()
+		            .expectComplete()
+		            .verifyThenAssertThat()
+		            .hasDropped(1)
+		            .hasDroppedErrors(1);
+	}
+
+	@Test
+	public void errorModeContinueNullPublisherFused() {
+		Flux<Integer> test = Flux
+				.just(1, 2)
+				.flatMapIterable(f -> {
+					if (f == 1) {
+						return null;
+					}
+					return Arrays.asList(f);
+				})
+				.onErrorContinue(OnNextFailureStrategyTest::drop);
+
+		StepVerifier.create(test)
+		            .expectNext(2)
+		            .expectComplete()
+		            .verifyThenAssertThat()
+		            .hasDropped(1)
+		            .hasDroppedErrors(1);
+	}
+
+	@Test
+	public void errorModeContinueInternalErrorFused() {
+		Flux<Integer> test = Flux
+				.just(1, 2)
+				.flatMapIterable(f -> {
+					if (f == 1) {
+						throw new IllegalStateException("boom");
+					}
+					return Arrays.asList(f);
+				})
+				.onErrorContinue(OnNextFailureStrategyTest::drop);
+
+		StepVerifier.create(test)
+		            .expectNext(2)
+		            .expectComplete()
+		            .verifyThenAssertThat()
+		            .hasDropped(1)
+		            .hasDroppedErrors(1);
+	}
+
+	@Test
+	public void errorModeContinueSingleElementFused() {
+		Flux<Integer> test = Flux
+				.just(1)
+				.flatMapIterable(f -> {
+					if (f == 1) {
+						throw new IllegalStateException("boom");
+					}
+					return Arrays.asList(f);
+				})
+				.onErrorContinue(OnNextFailureStrategyTest::drop);
+
+		StepVerifier.create(test)
+		            .expectComplete()
+		            .verifyThenAssertThat()
+		            .hasDropped(1)
+		            .hasDroppedErrors(1);
+	}
 }
